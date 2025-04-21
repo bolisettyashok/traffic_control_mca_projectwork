@@ -27,7 +27,7 @@ To set up the project locally, follow these steps:
 
  ### Data Preparation
 
-       python src/data_preprocessing.py
+    python src/data_preprocessing.py
        
  ### Model Training
 
