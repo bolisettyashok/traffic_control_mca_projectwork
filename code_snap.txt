@@ -1,0 +1,231 @@
+traffic_control_mca_projectwork/
+├── README.md
+├── requirements.txt
+├── venv/
+├── src/
+│   ├── data_preprocessing.py
+│   ├── model_training.py
+│   ├── prediction.py
+│   └── utils.py
+├── models/
+│   ├── feature_columns.pkl
+│   ├── scaler.pkl
+│   └── trained_model.pkl
+├── data/
+│   ├── data_preprocessing.csv
+│   ├── traffic_data.csv
+│   ├── weather_data.csv
+
+
+
+
+
+
+1. import pandas as pd
+2. from sklearn.preprocessing import MinMaxScaler
+3. import joblib
+4. import os
+5. 
+6. def load_data(traffic_file, weather_file):
+7.     traffic = pd.read_csv(traffic_file)
+8.     weather = pd.read_csv(weather_file, parse_dates=['Date.Full'])
+9.     weather.rename(columns={'Date.Full': 'timestamp'}, inplace=True)
+10.     return traffic, weather
+11. 
+12. def preprocess_data(traffic, weather):
+13.     # Merge datasets
+14.     weather['timestamp'] = pd.to_datetime(weather['timestamp'])
+15.     traffic['timestamp'] = pd.date_range(
+16.         start=weather['timestamp'].min(),
+17.         end=weather['timestamp'].max(),
+18.         periods=len(traffic)
+19.     )
+20.     merged = pd.merge(traffic, weather, on='timestamp')
+21.     
+22.     # Feature engineering
+23.     merged['hour'] = merged['timestamp'].dt.hour
+24.     merged['day_of_week'] = merged['timestamp'].dt.dayofweek
+25.     merged['month'] = merged['timestamp'].dt.month
+26.     merged['is_weekend'] = merged['timestamp'].dt.dayofweek // 5
+27. 
+28.     # Define features
+29.     FEATURE_COLUMNS = [
+30.         'link_length_km',
+31.         'pedal_cycles',
+32.         'two_wheeled_motor_vehicles',
+33.         'cars_and_taxis',
+34.         'buses_and_coaches',
+35.         'LGVs',
+36.         'all_HGVs',
+37.         'Data.Precipitation',
+38.         'Data.Temperature.Avg Temp',
+39.         'Data.Temperature.Max Temp',
+40.         'Data.Temperature.Min Temp',
+41.         'Data.Wind.Speed',
+42.         'hour',
+43.         'day_of_week',
+44.         'month',
+45.         'is_weekend'
+46.     ]
+47.     
+48.     # Target
+49.     merged['target'] = merged['all_motor_vehicles'].shift(-1).ffill()
+50.     
+51.     # Filter and preprocess
+52.     data = merged[FEATURE_COLUMNS + ['target']].copy()
+53.     data.ffill(inplace=True)
+54.     
+55.     # Scaling
+56.     scaler = MinMaxScaler()
+57.     data[FEATURE_COLUMNS] = scaler.fit_transform(data[FEATURE_COLUMNS])
+58.     
+59.     # Save artifacts
+60.     os.makedirs('models', exist_ok=True)
+61.     joblib.dump(scaler, './models/scaler.pkl')
+62.     joblib.dump(FEATURE_COLUMNS, 'models/feature_columns.pkl')
+63.     
+64.     data.to_csv('./data/processed_data.csv', index=False)
+65.     return data
+66. 
+67. if __name__ == '__main__':
+68.     traffic, weather = load_data('./data/traffic_data.csv', './data/weather_data.csv')
+69.     preprocess_data(traffic, weather)
+70. 
+
+
+
+1. import pandas as pd
+2. import numpy as np
+3. from keras.models import Sequential
+4. from keras.layers import LSTM, Dense
+5. from tensorflow.keras.losses import MeanSquaredError
+6. from sklearn.model_selection import train_test_split
+7. import joblib
+8. import os
+9. 
+10. def create_dataset(data, time_step=7):
+11.     """Safe sequence generation"""
+12.     X, y = [], []
+13.     for i in range(len(data)-time_step-1):
+14.         window = data.iloc[i:(i+time_step), :-1]
+15.         if not window.empty:
+16.             X.append(window.values)
+17.             y.append(data.iloc[i+time_step, -1])
+18.     
+19.     if len(X) == 0:
+20.         raise ValueError("No valid sequences generated")
+21.         
+22.     return np.array(X), np.array(y)
+23. 
+24. def build_model(input_shape):
+25.     model = Sequential([
+26.         LSTM(64, return_sequences=True, input_shape=input_shape),
+27.         LSTM(32),
+28.         Dense(1)
+29.     ])
+30.     model.compile(optimizer='adam', loss=MeanSquaredError())
+31.     return model
+32. 
+33. if __name__ == '__main__':
+34.     # Load data
+35.     data = pd.read_csv('./data/processed_data.csv')
+36.     FEATURE_COLUMNS = joblib.load('./models/feature_columns.pkl')
+37.     data = data[FEATURE_COLUMNS + ['target']]
+38. 
+39.     # Create sequences
+40.     X, y = create_dataset(data)
+41.     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+42. 
+43.     # Train
+44.     model = build_model((X_train.shape[1], X_train.shape[2]))
+45.     model.fit(X_train, y_train, epochs=100, batch_size=32)
+46.     
+47.     # Save
+48.     os.makedirs('models', exist_ok=True)
+49.     model.save('./models/traffic_model.h5')
+50. 
+
+
+
+
+
+1. # Add environment variables FIRST
+2. import os
+3. os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN messages
+4. os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
+5. 
+6. import streamlit as st
+7. from model_inference import predict
+8. import joblib
+9. from keras.models import load_model
+10. 
+11. # Render UI
+12. st.set_page_config(layout="wide")
+13. st.title("🚦 Traffic Volume Predictor")
+14. st.write("Enter values and click Predict")
+15. 
+16. # Load artifacts with improved error handling
+17. MODEL_FILES = {
+18.     'feature_columns': 'models/feature_columns.pkl',
+19.     'scaler': 'models/scaler.pkl',
+20.     'model': 'models/traffic_model.h5'
+21. }
+22. 
+23. try:
+24.     FEATURE_COLUMNS = joblib.load(MODEL_FILES['feature_columns'])
+25.     scaler = joblib.load(MODEL_FILES['scaler'])
+26.     model = load_model(MODEL_FILES['model'])
+27.     st.success("✅ Models loaded successfully!")
+28. except FileNotFoundError as e:
+29.     st.error(f"❌ Missing model file: {e.filename}")
+30.     st.stop()
+31. except Exception as e:
+32.     st.error(f"❌ Model loading failed: {str(e)}")
+33.     st.stop()
+34. 
+35. # Input fields (unchanged but kept for completeness)
+36. inputs = []
+37. col1, col2 = st.columns(2)
+38. 
+39. with col1:
+40.     inputs.append(st.number_input("Link Length (km)", min_value=0.0, value=48.75))
+41.     inputs.append(st.number_input("Pedal Cycles", min_value=0, value=228))
+42.     inputs.append(st.number_input("Motorcycles", min_value=0, value=289))
+43.     inputs.append(st.number_input("Cars/Taxis", min_value=0, value=19674))
+44.     inputs.append(st.number_input("Buses", min_value=0, value=245))
+45.     inputs.append(st.number_input("LGVs", min_value=0, value=2351))
+46.     inputs.append(st.number_input("HGVs", min_value=0, value=1295))
+47.     inputs.append(st.number_input("Precipitation (mm)", min_value=0.0, value=0.0))
+48. 
+49. with col2:
+50.     inputs.append(st.number_input("Avg Temp (°C)", value=15.0))
+51.     inputs.append(st.number_input("Max Temp (°C)", value=20.0))
+52.     inputs.append(st.number_input("Min Temp (°C)", value=10.0))
+53.     inputs.append(st.number_input("Wind Speed (km/h)", min_value=0.0, value=4.33))
+54.     inputs.append(st.number_input("Hour of Day", min_value=0, max_value=23, value=12))
+55.     inputs.append(st.number_input("Day of Week", min_value=0, max_value=6, value=3))
+56.     inputs.append(st.number_input("Month", min_value=1, max_value=12, value=3))
+57.     inputs.append(st.number_input("Is Weekend?", min_value=0, max_value=1, value=0))
+58. 
+59. if st.button("Predict Traffic", type="primary"):
+60.     try:
+61.         # Validate inputs
+62.         inputs = [float(x) for x in inputs]
+63.         if len(inputs) != len(FEATURE_COLUMNS):  # Dynamic check
+64.             st.error(f"⚠️ Requires {len(FEATURE_COLUMNS)} features, got {len(inputs)}")
+65.             st.stop()
+66.             
+67.         # Predict
+68.         pred = predict(inputs)
+69.         st.success(f"**Predicted Traffic Volume:** {pred:,.2f} vehicles")
+70.         
+71.     except ValueError as e:
+72.         st.error(f"❌ Invalid input: {str(e)}")
+73.     except Exception as e:
+74.         st.error(f"🚨 Prediction failed: {str(e)}")
+75. 
+76. # Add debug info (optional)
+77. with st.expander("Debug Info"):
+78.     st.write(f"Features expected: {FEATURE_COLUMNS}")
+79.     st.write(f"Last prediction: {pred if 'pred' in locals() else 'None'}")
+80. 
